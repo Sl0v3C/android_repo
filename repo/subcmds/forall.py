@@ -20,6 +20,7 @@ import multiprocessing
 import re
 import os
 import select
+import signal
 import sys
 import subprocess
 
@@ -119,6 +120,12 @@ without iterating through the remaining projects.
     p.add_option('-r', '--regex',
                  dest='regex', action='store_true',
                  help="Execute the command only on projects matching regex or wildcard expression")
+    p.add_option('-i', '--inverse-regex',
+                 dest='inverse_regex', action='store_true',
+                 help="Execute the command only on projects not matching regex or wildcard expression")
+    p.add_option('-g', '--groups',
+                 dest='groups',
+                 help="Execute the command only on projects matching the specified groups")
     p.add_option('-c', '--command',
                  help='Command (and arguments) to execute',
                  dest='command',
@@ -150,11 +157,15 @@ without iterating through the remaining projects.
     attributes that we need.
 
     """
+    if not self.manifest.IsMirror:
+      lrev = project.GetRevisionId()
+    else:
+      lrev = None
     return {
       'name': project.name,
       'relpath': project.relpath,
       'remote_name': project.remote.name,
-      'lrev': project.GetRevisionId(),
+      'lrev': lrev,
       'rrev': project.revisionExpr,
       'annotations': dict((a.name, a.value) for a in project.annotations),
       'gitdir': project.gitdir,
@@ -200,21 +211,28 @@ without iterating through the remaining projects.
     mirror = self.manifest.IsMirror
     rc = 0
 
-    if not opt.regex:
-      projects = self.GetProjects(args)
-    else:
+    smart_sync_manifest_name = "smart_sync_override.xml"
+    smart_sync_manifest_path = os.path.join(
+      self.manifest.manifestProject.worktree, smart_sync_manifest_name)
+
+    if os.path.isfile(smart_sync_manifest_path):
+      self.manifest.Override(smart_sync_manifest_path)
+
+    if opt.regex:
       projects = self.FindProjects(args)
+    elif opt.inverse_regex:
+      projects = self.FindProjects(args, inverse=True)
+    else:
+      projects = self.GetProjects(args, groups=opt.groups)
 
     os.environ['REPO_COUNT'] = str(len(projects))
 
-    pool = multiprocessing.Pool(opt.jobs)
+    pool = multiprocessing.Pool(opt.jobs, InitWorker)
     try:
       config = self.manifest.manifestProject.config
       results_it = pool.imap(
          DoWorkWrapper,
-         [[mirror, opt, cmd, shell, cnt, config, self._SerializeProject(p)]
-          for cnt, p in enumerate(projects)]
-      )
+         self.ProjectArgs(projects, mirror, opt, cmd, shell, config))
       pool.close()
       for r in results_it:
         rc = rc or r
@@ -227,7 +245,8 @@ without iterating through the remaining projects.
       rc = rc or errno.EINTR
     except Exception as e:
       # Catch any other exceptions raised
-      print('Got an error, terminating the pool: %r' % e,
+      print('Got an error, terminating the pool: %s: %s' %
+              (type(e).__name__, e),
             file=sys.stderr)
       pool.terminate()
       rc = rc or getattr(e, 'errno', 1)
@@ -236,11 +255,28 @@ without iterating through the remaining projects.
     if rc != 0:
       sys.exit(rc)
 
+  def ProjectArgs(self, projects, mirror, opt, cmd, shell, config):
+    for cnt, p in enumerate(projects):
+      try:
+        project = self._SerializeProject(p)
+      except Exception as e:
+        print('Project list error on project %s: %s: %s' %
+                (p.name, type(e).__name__, e),
+              file=sys.stderr)
+        return
+      except KeyboardInterrupt:
+        print('Project list interrupted',
+              file=sys.stderr)
+        return
+      yield [mirror, opt, cmd, shell, cnt, config, project]
 
 class WorkerKeyboardInterrupt(Exception):
   """ Keyboard interrupt exception for worker processes. """
   pass
 
+
+def InitWorker():
+  signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 def DoWorkWrapper(args):
   """ A wrapper around the DoWork() method.
@@ -263,7 +299,9 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
   def setenv(name, val):
     if val is None:
       val = ''
-    env[name] = val.encode()
+    if hasattr(val, 'encode'):
+      val = val.encode()
+    env[name] = val
 
   setenv('REPO_PROJECT', project['name'])
   setenv('REPO_PATH', project['relpath'])

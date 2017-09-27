@@ -1,0 +1,10 @@
+#!/bin/bash                                                                                                                                                                                                         
+path=`pwd`
+cd $path
+git clone https://github.com/Sl0v3C/android_repo.git
+
+mkdir .repo
+mv android_repo/repo .repo/
+rm android_repo -rf 
+.repo/repo/repo $@
+
