@@ -1,10 +1,8 @@
 #!/bin/bash                                                                                                                                                                                                         
 path=`pwd`
 cd $path
-git clone https://github.com/Sl0v3C/android_repo.git
-
+git clone -b stable git@github.com:GerritCodeReview/git-repo.git repo
 mkdir .repo
-mv android_repo/repo .repo/
-rm android_repo -rf 
+mv repo .repo/
 .repo/repo/repo $@
 
